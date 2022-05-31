@@ -1,0 +1,500 @@
+diff -Naur tensorflow-2.9.1_orig/.bazelrc tensorflow-2.9.1/.bazelrc
+--- tensorflow-2.9.1_orig/.bazelrc	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/.bazelrc	2022-05-28 16:52:04.441993000 +0900
+@@ -20,6 +20,9 @@
+ # Macosx options
+ #     darwin_arm64:
+ #
++# FreeBSD options:
++#     freebsd:
++#
+ # Compiler options:
+ #     cuda_clang:             Use clang when building CUDA code.
+ #     c++17:                  Build with C++17 options (links with libc++)
+@@ -297,6 +300,7 @@
+ build:linux --host_copt=-w
+ build:macos --copt=-w
+ build:windows --copt=/W0
++build:freebsd --copt=-w
+ 
+ # Tensorflow uses M_* math constants that only get defined by MSVC headers if
+ # _USE_MATH_DEFINES is defined.
+@@ -312,6 +316,11 @@
+ build:macos --define=LIBDIR=$(PREFIX)/lib
+ build:macos --define=INCLUDEDIR=$(PREFIX)/include
+ build:macos --define=PROTOBUF_INCLUDE_PATH=$(PREFIX)/include
++build:freebsd --define=PREFIX=/usr
++build:freebsd --define=LIBDIR=$(PREFIX)/lib
++build:freebsd --define=INCLUDEDIR=$(PREFIX)/include
++build:freebsd --define=PROTOBUF_INCLUDE_PATH=$(PREFIX)/include
++
+ # TF_SYSTEM_LIBS do not work on windows.
+ 
+ # By default, build TF in C++ 14 mode.
+@@ -325,6 +334,8 @@
+ build:macos --host_cxxopt=-std=c++14
+ build:windows --cxxopt=/std:c++14
+ build:windows --host_cxxopt=/std:c++14
++build:freebsd --cxxopt=-std=c++14
++build:freebsd --host_cxxopt=-std=c++14
+ 
+ # On windows, we still link everything into a single DLL.
+ build:windows --config=monolithic
+@@ -332,6 +343,9 @@
+ # On linux, we dynamically link small amount of kernels
+ build:linux --config=dynamic_kernels
+ 
++# On FreeBSD, we dynamically link small amount of kernels
++#build:freebsd --config=dynamic_kernels
++
+ # Make sure to include as little of windows.h as possible
+ build:windows --copt=-DWIN32_LEAN_AND_MEAN
+ build:windows --host_copt=-DWIN32_LEAN_AND_MEAN
+@@ -362,6 +376,8 @@
+ build:windows --distinct_host_configuration=false
+ # On linux, don't cross compile by default
+ build:linux --distinct_host_configuration=false
++# On FreeBSD, don't cross compile by default
++build:freebsd --distinct_host_configuration=false
+ 
+ # Do not risk cache corruption. See:
+ # https://github.com/bazelbuild/bazel/issues/3360
+@@ -378,6 +394,10 @@
+ build:avx_linux --host_copt=-mavx
+ build:avx2_linux --copt=-mavx2
+ build:native_arch_linux --copt=-march=native
++build:avx_freebsd --copt=-mavx
++build:avx_freebsd --host_copt=-mavx
++build:avx2_freebsd --copt=-mavx2
++build:native_arch_freebsd --copt=-march=native
+ build:avx_win --copt=/arch=AVX
+ build:avx2_win --copt=/arch=AVX2
+ 
+diff -Naur tensorflow-2.9.1_orig/.tf_configure.bazelrc tensorflow-2.9.1/.tf_configure.bazelrc
+--- tensorflow-2.9.1_orig/.tf_configure.bazelrc	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/.tf_configure.bazelrc	2022-05-28 14:34:53.170384000 +0900
+@@ -0,0 +1,11 @@
++build --action_env PYTHON_BIN_PATH="/usr/local/bin/python3"
++build --action_env PYTHON_LIB_PATH="/usr/local/lib/python3.8/site-packages"
++build --python_path="/usr/local/bin/python3"
++build:opt --copt=-Wno-sign-compare
++build:opt --host_copt=-Wno-sign-compare
++test --flaky_test_attempts=3
++test --test_size_filters=small,medium
++test:v1 --test_tag_filters=-benchmark-test,-no_oss,-oss_serial
++test:v1 --build_tag_filters=-benchmark-test,-no_oss
++test:v2 --test_tag_filters=-benchmark-test,-no_oss,-oss_serial,-v1only
++test:v2 --build_tag_filters=-benchmark-test,-no_oss,-v1only
+diff -Naur tensorflow-2.9.1_orig/configure.py tensorflow-2.9.1/configure.py
+--- tensorflow-2.9.1_orig/configure.py	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/configure.py	2022-05-28 12:58:52.094689000 +0900
+@@ -81,6 +81,8 @@
+ def is_macos():
+   return platform.system() == 'Darwin'
+ 
++def is_freebsd():
++  return platform.system() == 'FreeBSD'
+ 
+ def is_ppc64le():
+   return platform.machine() == 'ppc64le'
+diff -Naur tensorflow-2.9.1_orig/tensorflow/BUILD tensorflow-2.9.1/tensorflow/BUILD
+--- tensorflow-2.9.1_orig/tensorflow/BUILD	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/BUILD	2022-05-28 17:14:04.007139000 +0900
+@@ -473,8 +473,11 @@
+ )
+ 
+ config_setting(
+-    name = "freebsd",
++    name = "freebsd-amd64",
+     values = {"cpu": "freebsd"},
++    flag_values = {
++        "//bazel_tools/tools/cpp:toolchain_type": "cc-compiler-freebsd"
++    },
+     visibility = ["//visibility:public"],
+ )
+ 
+@@ -937,10 +940,6 @@
+             "-Wl,-unexported_symbols_list,$(location //tensorflow:tf_private_symbols.lds)",
+         ],
+         "//tensorflow:windows": [],
+-        "//tensorflow:freebsd": [
+-            "-Wl,--version-script,$(location //tensorflow:tf_framework_version_script.lds)",
+-            "-lexecinfo",
+-        ],
+         "//conditions:default": [
+             "-Wl,--version-script,$(location //tensorflow:tf_framework_version_script.lds)",
+         ],
+@@ -1008,6 +1007,10 @@
+         ],
+         "//tensorflow:windows": [
+         ],
++        "//tensorflow:freebsd": [
++            "-z defs",
++            "-Wl,--version-script,$(location //tensorflow/c:version_script.lds)",
++        ],
+         # copybara:uncomment_begin(google-only)
+         # "//tools/cpp:asan_build": [
+         # "-Wl,--version-script,$(location //tensorflow/c:version_script.lds)",
+@@ -1052,6 +1055,10 @@
+             "-Wl,-exported_symbols_list,$(location //tensorflow:tf_exported_symbols.lds)",
+         ],
+         "//tensorflow:windows": [],
++        "//tensorflow:freebsd": [
++            "-z defs",
++            "-Wl,--version-script,$(location //tensorflow:tf_version_script.lds)",
++        ],
+         "//conditions:default": [
+             "-z defs",
+             "-Wl,--version-script,$(location //tensorflow:tf_version_script.lds)",
+diff -Naur tensorflow-2.9.1_orig/tensorflow/compiler/xla/BUILD tensorflow-2.9.1/tensorflow/compiler/xla/BUILD
+--- tensorflow-2.9.1_orig/tensorflow/compiler/xla/BUILD	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/compiler/xla/BUILD	2022-05-28 17:39:26.604588000 +0900
+@@ -217,7 +217,6 @@
+         "statusor.h",
+     ],
+     linkopts = select({
+-        "//tensorflow:freebsd": ["-lexecinfo"],
+         "//conditions:default": [],
+     }),
+     visibility = ["//visibility:public"],
+diff -Naur tensorflow-2.9.1_orig/tensorflow/core/BUILD tensorflow-2.9.1/tensorflow/core/BUILD
+--- tensorflow-2.9.1_orig/tensorflow/core/BUILD	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/core/BUILD	2022-05-28 17:40:44.116884000 +0900
+@@ -1284,7 +1284,6 @@
+     hdrs = [":lib_internal_public_headers"],
+     copts = tf_copts(),
+     linkopts = select({
+-        "//tensorflow:freebsd": [],
+         "//tensorflow:windows": [],
+         "//tensorflow:android": [],
+         "//conditions:default": [
+@@ -1309,7 +1308,6 @@
+     hdrs = [":lib_internal_public_headers"],
+     copts = tf_copts(),
+     linkopts = select({
+-        "//tensorflow:freebsd": [],
+         "//tensorflow:windows": [],
+         "//tensorflow:android": [],
+         "//conditions:default": [
+@@ -1522,7 +1520,6 @@
+     compatible_with = get_compatible_with_portable(),
+     copts = tf_copts(),
+     linkopts = select({
+-        "//tensorflow:freebsd": [],
+         "//tensorflow:windows": [],
+         "//conditions:default": [
+             "-ldl",
+@@ -1657,7 +1654,6 @@
+     hdrs = [":framework_internal_public_headers"],
+     copts = tf_copts(),
+     linkopts = select({
+-        "//tensorflow:freebsd": ["-lm"],
+         "//tensorflow:windows": [],
+         "//conditions:default": [
+             "-ldl",
+diff -Naur tensorflow-2.9.1_orig/tensorflow/core/lib/gif/BUILD tensorflow-2.9.1/tensorflow/core/lib/gif/BUILD
+--- tensorflow-2.9.1_orig/tensorflow/core/lib/gif/BUILD	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/core/lib/gif/BUILD	2022-05-28 17:41:46.268813000 +0900
+@@ -28,7 +28,6 @@
+     hdrs = ["gif_io.h"],
+     copts = tf_copts(),
+     linkopts = select({
+-        "//tensorflow:freebsd": [],
+         "//tensorflow:windows": [],
+         "//conditions:default": ["-ldl"],
+     }),
+diff -Naur tensorflow-2.9.1_orig/tensorflow/core/lib/jpeg/BUILD tensorflow-2.9.1/tensorflow/core/lib/jpeg/BUILD
+--- tensorflow-2.9.1_orig/tensorflow/core/lib/jpeg/BUILD	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/core/lib/jpeg/BUILD	2022-05-28 17:41:15.707819000 +0900
+@@ -32,7 +32,6 @@
+     ],
+     copts = tf_copts(),
+     linkopts = select({
+-        "//tensorflow:freebsd": [],
+         "//tensorflow:windows": [],
+         "//conditions:default": ["-ldl"],
+     }),
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/builds/libtensorflow.sh tensorflow-2.9.1/tensorflow/tools/ci_build/builds/libtensorflow.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/builds/libtensorflow.sh	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/builds/libtensorflow.sh	2022-05-28 17:12:24.174277000 +0900
+@@ -53,6 +53,8 @@
+   TARBALL_SUFFIX="${1}"
+   if [ "$(uname)" == "Darwin" ]; then
+     BAZEL_OPTS="${BAZEL_OPTS} --config=release_cpu_macos"
++  elif [ "$(uname)" == "FreeBSD" ]; then
++    BAZEL_OPTS="${BAZEL_OPTS} --config=release_cpu_freebsd"
+   elif [ "${TF_NEED_CUDA}" == "1" ]; then
+     BAZEL_OPTS="${BAZEL_OPTS} --config=release_gpu_linux"
+   else
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/cpu/run_contrib.sh tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/cpu/run_contrib.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/cpu/run_contrib.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/cpu/run_contrib.sh	2022-05-28 15:22:22.786651000 +0900
+@@ -0,0 +1,39 @@
++#!/usr/bin/env bash
++# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++# ==============================================================================
++
++set -e
++set -x
++
++N_JOBS=$(sysctl -n hw.ncpu)
++N_JOBS=$((N_JOBS+1))
++
++echo ""
++echo "Bazel will use ${N_JOBS} concurrent job(s)."
++echo ""
++
++# Run configure.
++export TF_NEED_CUDA=0
++export CC_OPT_FLAGS='-mavx'
++export PYTHON_BIN_PATH=$(which python3)
++yes "" | $PYTHON_BIN_PATH configure.py
++which bazel
++# TODO(b/122370901): Fix nomac, no_mac inconsistency.
++bazel test --test_tag_filters=-no_oss,-gpu,-tpu,-benchmark-test,-nomac,-no_mac \
++    --test_timeout 300,450,1200,3600 \
++    --test_size_filters=small,medium --config=opt \
++    --jobs=${N_JOBS} --build_tests_only --test_output=errors -k -- \
++    //tensorflow/contrib/... -//tensorflow/lite/...
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/cpu/run_py2_cc_core.sh tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/cpu/run_py2_cc_core.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/cpu/run_py2_cc_core.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/cpu/run_py2_cc_core.sh	2022-05-23 07:28:22.000000000 +0900
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++# ==============================================================================
++
++set -e
++set -x
++
++N_JOBS=$(sysctl -n hw.ncpu)
++N_JOBS=$((N_JOBS+1))
++
++echo ""
++echo "Bazel will use ${N_JOBS} concurrent job(s)."
++echo ""
++
++# Run configure.
++export TF_NEED_CUDA=0
++export TF_NEED_ROCM=0
++export CC_OPT_FLAGS='-mavx'
++export PYTHON_BIN_PATH=$(which python2)
++yes "" | $PYTHON_BIN_PATH configure.py
++which bazel
++# TODO(b/122370901): Fix nomac, no_mac inconsistency.
++bazel test --test_tag_filters=-no_oss,-gpu,-tpu,-benchmark-test,-nomac,-no_mac \
++    --test_timeout 300,450,1200,3600 --config=opt \
++    --announce_rc \
++    --test_size_filters=small,medium \
++    --jobs=${N_JOBS} --build_tests_only --test_output=errors -k -- \
++    //tensorflow/... -//tensorflow/compiler/... -//tensorflow/contrib/...
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/cpu/run_py3_cc_core.sh tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/cpu/run_py3_cc_core.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/cpu/run_py3_cc_core.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/cpu/run_py3_cc_core.sh	2022-05-23 07:28:22.000000000 +0900
+@@ -0,0 +1,38 @@
++#!/usr/bin/env bash
++# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++# ==============================================================================
++
++set -e
++set -x
++
++N_JOBS=$(sysctl -n hw.ncpu)
++N_JOBS=$((N_JOBS+1))
++
++echo ""
++echo "Bazel will use ${N_JOBS} concurrent job(s)."
++echo ""
++
++# Run configure.
++export TF_NEED_CUDA=0
++export PYTHON_BIN_PATH=$(which python3)
++yes "" | $PYTHON_BIN_PATH configure.py
++which bazel
++bazel test --test_tag_filters=-no_oss,-gpu,-tpu,-benchmark-test,-nomac,-no_mac \
++    --announce_rc \
++    --test_timeout 300,450,1200,3600 \
++    --test_size_filters=small,medium \
++    --jobs=${N_JOBS} --build_tests_only --test_output=errors -k -- \
++    //tensorflow/... -//tensorflow/compiler/... -//tensorflow/contrib/...
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/libtensorflow_cpu.sh tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/libtensorflow_cpu.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/libtensorflow_cpu.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/libtensorflow_cpu.sh	2022-05-28 15:08:15.121106000 +0900
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++#
++# Script to produce binary release of libtensorflow (C API, Java jars etc.).
++
++set -ex
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++# See comments at the top of this file for details.
++source "${SCRIPT_DIR}/../builds/libtensorflow.sh"
++
++# Configure script
++export PYTHON_BIN_PATH="/usr/bin/python"
++export TF_NEED_HDFS=0
++export TF_NEED_CUDA=0
++export TF_NEED_ROCM=0
++export TF_NEED_MKL=0
++export COMPUTECPP_PATH="/usr/local"
++
++export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
++build_libtensorflow_tarball "-cpu-freebsd-$(uname -m)"
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/libtensorflow_gpu.sh tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/libtensorflow_gpu.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/libtensorflow_gpu.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/libtensorflow_gpu.sh	2022-05-28 15:08:29.289159000 +0900
+@@ -0,0 +1,35 @@
++#!/usr/bin/env bash
++# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++#
++# Script to produce binary release of libtensorflow (C API, Java jars etc.).
++
++set -ex
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++# See comments at the top of this file for details.
++source "${SCRIPT_DIR}/../builds/libtensorflow.sh"
++
++# Configure script
++export TF_NEED_CUDA=1
++export LD_LIBRARY_PATH="/usr/local/cuda/lib:/usr/local/cuda/extras/CUPTI/lib:${LD_LIBRARY_PATH}"
++export PYTHON_BIN_PATH="/usr/bin/python"
++export TF_NEED_HDFS=0
++export TF_NEED_ROCM=0
++export TF_NEED_MKL=0
++export COMPUTECPP_PATH="/usr/local"
++
++export PATH="/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
++build_libtensorflow_tarball "-gpu-freebsd-$(uname -m)"
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/libtensorflow_rocm.sh tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/libtensorflow_rocm.sh
+--- tensorflow-2.9.1_orig/tensorflow/tools/ci_build/freebsd/libtensorflow_rocm.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/ci_build/freebsd/libtensorflow_rocm.sh	2022-05-28 15:08:43.776132000 +0900
+@@ -0,0 +1,35 @@
++#!/usr/bin/env bash
++# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++#
++# Script to produce binary release of libtensorflow (C API, Java jars etc.).
++
++set -ex
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++# See comments at the top of this file for details.
++source "${SCRIPT_DIR}/../builds/libtensorflow.sh"
++
++# Configure script
++export TF_NEED_ROCM=1
++export PYTHON_BIN_PATH="/usr/bin/python"
++export TF_NEED_GCP=0
++export TF_NEED_HDFS=0
++export TF_NEED_CUDA=0
++export TF_NEED_MKL=0
++export COMPUTECPP_PATH="/usr/local"
++
++export PATH="/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
++build_libtensorflow_tarball "-gpu-freebsd-$(uname -m)"
+diff -Naur tensorflow-2.9.1_orig/tensorflow/tools/toolchains/BUILD tensorflow-2.9.1/tensorflow/tools/toolchains/BUILD
+--- tensorflow-2.9.1_orig/tensorflow/tools/toolchains/BUILD	2022-05-23 07:28:22.000000000 +0900
++++ tensorflow-2.9.1/tensorflow/tools/toolchains/BUILD	2022-05-28 12:54:01.819630000 +0900
+@@ -73,3 +73,16 @@
+         "Pool": "default",
+     },
+ )
++
++# Built with //tensorflow/tools/ci_build/Dockerfile.rbe.ubuntu16.04-manylinux2010.
++platform(
++    name = "rbe_freebsd",
++    constraint_values = [
++        "@bazel_tools//platforms:x86_64",
++        "@bazel_tools//platforms:freebsd",
++    ],
++#    exec_properties = {
++#        "container-image": "docker://gcr.io/tensorflow-testing/nosla-ubuntu16.04-manylinux2010@%s" % container_digests["ubuntu16.04-manylinux2010"],
++#        "Pool": "default",
++#    },
++)
+diff -Naur tensorflow-2.9.1_orig/tools/python_bin_path.sh tensorflow-2.9.1/tools/python_bin_path.sh
+--- tensorflow-2.9.1_orig/tools/python_bin_path.sh	1970-01-01 09:00:00.000000000 +0900
++++ tensorflow-2.9.1/tools/python_bin_path.sh	2022-05-28 14:34:30.811169000 +0900
+@@ -0,0 +1 @@
++export PYTHON_BIN_PATH="/usr/local/bin/python3"
+\ No newline at end of file
